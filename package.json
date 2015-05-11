@@ -1,0 +1,20 @@
+{
+  "name": "bucketCloner",
+  "version": "0.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "s3",
+    "bucket"
+  ],
+  "author": "Brad Isbell <bisbell@homefinder.com>",
+  "license": "MIT",
+  "dependencies": {
+    "underscore": "^1.8.3",
+    "aws-sdk": "^2.1.26",
+    "yargs": "^3.8.0"
+  }
+}
