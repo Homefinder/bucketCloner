@@ -1,17 +1,15 @@
 var AWS = require('aws-sdk');
 var http = require('http');
 var yargs = require('yargs');
-var _ = require('underscore');
 
 AWS.config.sslEnabled = false;
-http.globalAgent.maxSockets = 100;
 
 var s3 = new AWS.S3();
 var objectsToCopy = [];
-var maxThreads = 50;
-var currentThreads = 0;
+var maxRequests;
+var currentRequests = 0;
 
-var nextMarker;
+var nextMarker = null;
 var listInProgress = false;
 
 var progress = {
@@ -20,8 +18,8 @@ var progress = {
   bytesTransferred: 0
 }
 
-function startThread() {
-  currentThreads++;
+function startRequest() {
+  currentRequests++;
   var objectToCopy = objectsToCopy.pop();
 
   s3.copyObject({
@@ -37,15 +35,14 @@ function startThread() {
       progress.bytesTransferred += objectToCopy.Size
     }
     
-    currentThreads--;
-    setImmediate(startThreads);
+    currentRequests--;
+    setImmediate(startRequests);
 
   });
 }
 
-function startThreads() {
+function startRequests() {
   if (!listInProgress && objectsToCopy.length < 10000 && nextMarker !== false) {
-    console.log('listing objects', nextMarker);
     listInProgress = true;
     s3.listObjects({
       Bucket: argv.source,
@@ -54,19 +51,22 @@ function startThreads() {
       if (err) {
         console.log('Error listing objects', err)
       }
-      objectsToCopy = objectsToCopy.concat(data.Contents);
-      if (data.IsTruncated) {
-        nextMarker = data.Contents[data.Contents.length-1].Key;
-      } else {
-        nextMarker = false;
+      
+      if (data) {
+        objectsToCopy = objectsToCopy.concat(data.Contents);
+        if (data.IsTruncated) {
+          nextMarker = data.Contents[data.Contents.length-1].Key;
+        } else {
+          nextMarker = false;
+        }  
       }
       listInProgress = false;
-      startThreads();
+      startRequests();
     });
   }
 
-  while (currentThreads <= maxThreads && objectsToCopy.length) {
-    startThread();
+  while (currentRequests <= maxRequests && objectsToCopy.length) {
+    startRequest();
   }
 }
 
@@ -75,19 +75,23 @@ var argv = yargs
   .demand(['source','target'])
   .argv;
 
-if (argv.threads) {
-  maxThreads = argv.threads;
-}
+maxRequests = argv.maxRequests || 500;
+http.globalAgent.maxSockets = argv.maxSockets || 100;
+nextMarker = argv.marker || null;
 
-startThreads();
+startRequests();
 
 setInterval(function () {
   var uptime = process.uptime();
-  console.log(_.extend(progress, {
+  console.log({
     uptime: uptime,
-    filesPerSecond: progress.succeeded / uptime,
-    MBytesPerSecond: (progress.bytesTransferred/1024/1024) / uptime,
     listBufferSize: objectsToCopy.length,
+    succeeded: progress.succeeded,
+    failed: progress.failed,
+    gigabytesTransferred: progress.bytesTransferred/1024/1024/1024,
+    megabitsPerSecond: ((progress.bytesTransferred/1024/1024) * 8) / uptime,
+    objectsPerSecond: progress.succeeded / uptime,
     marker: nextMarker
-  }));
+  });
+
 }, 1000);
