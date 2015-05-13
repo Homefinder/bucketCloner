@@ -1,12 +1,18 @@
 var AWS = require('aws-sdk');
-var Promise = require("bluebird");
+var http = require('http');
 var yargs = require('yargs');
 var _ = require('underscore');
+
+AWS.config.sslEnabled = false;
+http.globalAgent.maxSockets = 100;
 
 var s3 = new AWS.S3();
 var objectsToCopy = [];
 var maxThreads = 50;
 var currentThreads = 0;
+
+var nextMarker;
+var listInProgress = false;
 
 var progress = {
   succeeded: 0,
@@ -14,54 +20,9 @@ var progress = {
   bytesTransferred: 0
 }
 
-function getFullDirectoryList (bucket, progressCallback) {
-  progressCallback = progressCallback || _.noop;
-  
-  return new Promise(function (resolve, reject) {
-    var tempObjectList = [];
-    
-    function listObjects (marker) {
-      var listOpts = {
-        Bucket: bucket
-      };
-      
-      if (marker) {
-        listOpts.Marker = marker;
-      }
-      s3.listObjects(listOpts, function (err, data) {
-        if (err) { // If we couldn't even list objects, fail completely
-          reject(err);
-        }
-        
-        if (data) {
-          var marker = data.Contents[data.Contents.length-1].Key;
-          tempObjectList = tempObjectList.concat(data.Contents);
-          progressCallback({
-            objects: data.Contents,
-            objectCount: tempObjectList.length,
-            marker: marker
-          });
-          
-          if (data.IsTruncated) {
-            setImmediate(function () {
-              listObjects(marker);
-            });
-          } else {
-            resolve(tempObjectList);
-          }
-        }
-      });
-    }
-
-    listObjects();
-  });
-}
-
 function startThread() {
   currentThreads++;
   var objectToCopy = objectsToCopy.pop();
-  
-  //console.log('Copying ', objectToCopy.Key);
 
   s3.copyObject({
     Bucket: argv.target,
@@ -78,12 +39,32 @@ function startThread() {
     
     currentThreads--;
     setImmediate(startThreads);
-    
-    
+
   });
 }
 
 function startThreads() {
+  if (!listInProgress && objectsToCopy.length < 10000 && nextMarker !== false) {
+    console.log('listing objects', nextMarker);
+    listInProgress = true;
+    s3.listObjects({
+      Bucket: argv.source,
+      Marker: nextMarker
+    }, function (err, data) {
+      if (err) {
+        console.log('Error listing objects', err)
+      }
+      objectsToCopy = objectsToCopy.concat(data.Contents);
+      if (data.IsTruncated) {
+        nextMarker = data.Contents[data.Contents.length-1].Key;
+      } else {
+        nextMarker = false;
+      }
+      listInProgress = false;
+      startThreads();
+    });
+  }
+
   while (currentThreads <= maxThreads && objectsToCopy.length) {
     startThread();
   }
@@ -98,12 +79,7 @@ if (argv.threads) {
   maxThreads = argv.threads;
 }
 
-getFullDirectoryList(argv.source, function (progress) {
-  //console.log(_.pick(progress, 'objectCount', 'marker'));
-  objectsToCopy = objectsToCopy.concat(progress.objects);
-  //console.log('Objects left to copy: ', objectsToCopy.length);
-  startThreads();
-});
+startThreads();
 
 setInterval(function () {
   var uptime = process.uptime();
@@ -111,6 +87,7 @@ setInterval(function () {
     uptime: uptime,
     filesPerSecond: progress.succeeded / uptime,
     MBytesPerSecond: (progress.bytesTransferred/1024/1024) / uptime,
-    objectsToCopy: objectsToCopy.length
+    listBufferSize: objectsToCopy.length,
+    marker: nextMarker
   }));
-}, 500);
+}, 1000);
